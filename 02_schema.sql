@@ -1,10 +1,15 @@
 -- =============================================================================
 -- 02_schema.sql
--- Snowflake schema DDL — dimension tables and fact table.
+-- Snowflake schema DDL.
 --
--- Hierarchy summary:
---   dim_date:     date → month → season → year → decade
---   dim_location: band_cell → (lat_band, lon_band) → nation
+-- Design principle: dimensions are split into separate tables where each level
+-- represents an independently meaningful entity worth querying on its own.
+-- dim_date stays flat because its hierarchy levels (month, season, decade)
+-- are derived numbers, not independent entities.
+--
+-- Hierarchies:
+--   dim_date:     date → month → season → year → decade  (flat)
+--   dim_location: band_cell → region → nation
 --   dim_species:  species → species_type
 --   dim_event:    event → event_category
 -- =============================================================================
@@ -12,7 +17,8 @@
 
 -- -----------------------------------------------------------------------------
 -- DIM_DATE
--- Hierarchy: date → month → season → year → decade
+-- Flat table — all hierarchy levels as columns.
+-- Hierarchy: full_date → month → season → year → decade
 -- -----------------------------------------------------------------------------
 DROP TABLE IF EXISTS dim_date CASCADE;
 
@@ -30,33 +36,33 @@ CREATE TABLE dim_date (
 
 -- -----------------------------------------------------------------------------
 -- DIM_LOCATION
--- Hierarchy: band_cell → lat_band/lon_band → nation
--- Split into three tables to make the hierarchy explicit and queryable.
+-- Hierarchy: band_cell → region → nation
+-- Split into three tables: each level is a meaningful geographic entity
+-- that can be aggregated over independently in OLAP queries.
 -- -----------------------------------------------------------------------------
 DROP TABLE IF EXISTS dim_location CASCADE;
-DROP TABLE IF EXISTS dim_lat_band CASCADE;
-DROP TABLE IF EXISTS dim_lon_band CASCADE;
+DROP TABLE IF EXISTS dim_region CASCADE;
+DROP TABLE IF EXISTS dim_nation CASCADE;
 
-CREATE TABLE dim_lat_band (
-    lat_band_id SERIAL      PRIMARY KEY,
-    lat_band    VARCHAR(10) NOT NULL UNIQUE,   -- e.g. '57-58'
-    lat_centroid NUMERIC(6,3) NOT NULL
+CREATE TABLE dim_nation (
+    nation_id   SERIAL      PRIMARY KEY,
+    nation      VARCHAR(30) NOT NULL UNIQUE
 );
 
-CREATE TABLE dim_lon_band (
-    lon_band_id SERIAL      PRIMARY KEY,
-    lon_band    VARCHAR(15) NOT NULL UNIQUE,   -- e.g. '-3 to -2'
-    lon_centroid NUMERIC(6,3) NOT NULL
+CREATE TABLE dim_region (
+    region_id   SERIAL      PRIMARY KEY,
+    region      VARCHAR(50) NOT NULL UNIQUE,
+    nation_id   INT         NOT NULL REFERENCES dim_nation(nation_id)
 );
 
 CREATE TABLE dim_location (
-    location_id SERIAL  PRIMARY KEY,
-    lat_band_id INT     NOT NULL REFERENCES dim_lat_band(lat_band_id),
-    lon_band_id INT     NOT NULL REFERENCES dim_lon_band(lon_band_id),
+    location_id SERIAL       PRIMARY KEY,
+    lat_band    VARCHAR(10)  NOT NULL,
+    lon_band    VARCHAR(15)  NOT NULL,
     band_lat    NUMERIC(6,3) NOT NULL,
     band_lon    NUMERIC(6,3) NOT NULL,
-    nation      VARCHAR(20),
-    UNIQUE (lat_band_id, lon_band_id)
+    region_id   INT          NOT NULL REFERENCES dim_region(region_id),
+    UNIQUE (lat_band, lon_band)
 );
 
 
@@ -105,14 +111,14 @@ CREATE TABLE dim_event (
 DROP TABLE IF EXISTS fact_phenology_observation CASCADE;
 
 CREATE TABLE fact_phenology_observation (
-    observation_id      SERIAL  PRIMARY KEY,
-    record_id           BIGINT     NOT NULL,
+    observation_id      SERIAL   PRIMARY KEY,
+    record_id           BIGINT   NOT NULL,
 
     -- Dimension foreign keys
-    date_id             INT     NOT NULL REFERENCES dim_date(date_id),
-    location_id         INT     NOT NULL REFERENCES dim_location(location_id),
-    species_id          INT     NOT NULL REFERENCES dim_species(species_id),
-    event_id            INT     NOT NULL REFERENCES dim_event(event_id),
+    date_id             INT      NOT NULL REFERENCES dim_date(date_id),
+    location_id         INT      NOT NULL REFERENCES dim_location(location_id),
+    species_id          INT      NOT NULL REFERENCES dim_species(species_id),
+    event_id            INT      NOT NULL REFERENCES dim_event(event_id),
 
     -- Event timing (primary response variable)
     day_of_year         SMALLINT NOT NULL,

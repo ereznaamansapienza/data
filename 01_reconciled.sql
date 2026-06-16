@@ -1,63 +1,36 @@
 -- =============================================================================
 -- 01_reconciled.sql
--- Reconciled layer: import the unified CSV and apply cleaning / enrichment.
+-- Reconciled layer: clean and enrich the staged data.
 --
--- Run order:
---   psql -d phenology_dw -f 01_reconciled.sql
---
--- Prerequisite: the CSV has been imported into a staging table.
--- To create the staging table and import, run first:
---
---   CREATE TABLE staging_phenology_weather (
---       record_id           INT,
---       obs_date            DATE,
---       year                SMALLINT,
---       month               SMALLINT,
---       day                 SMALLINT,
---       band_lat            NUMERIC(6,3),
---       band_lon            NUMERIC(6,3),
---       species             VARCHAR(100),
---       species_type        VARCHAR(50),
---       event               VARCHAR(100),
---       day_of_year         SMALLINT,
---       temp_mean_window    NUMERIC(5,2),
---       temp_max_window     NUMERIC(5,2),
---       temp_min_window     NUMERIC(5,2),
---       temp_std_window     NUMERIC(5,2),
---       precip_sum_window   NUMERIC(7,2),
---       dry_days_window     SMALLINT,
---       gdd_window          NUMERIC(7,2),
---       temp_mean_spring    NUMERIC(5,2),
---       temp_mean_winter    NUMERIC(5,2),
---       precip_sum_spring   NUMERIC(7,2),
---       et0_sum_spring      NUMERIC(7,2),
---       temp_max_year       NUMERIC(5,2),
---       temp_min_year       NUMERIC(5,2),
---       precip_sum_year     NUMERIC(7,2),
---       frost_days_year     SMALLINT,
---       last_frost_doy      SMALLINT,
---       spring_onset_doy    SMALLINT,
---       season              VARCHAR(10)
---   );
---
---   \copy staging_phenology_weather FROM 'phenology_weather_unified.csv'
---       WITH (FORMAT csv, HEADER true, NULL '');
+-- Derived columns added:
+--   lat_band, lon_band  — band strings derived from centroids
+--   decade              — derived from year
+--   event_category      — phenological classification of event
+--   nation              — UK nation derived from coordinates
+--   region              — ONS/standard region derived from coordinates
 -- =============================================================================
 
-
--- -----------------------------------------------------------------------------
--- Create reconciled table with derived columns added
--- -----------------------------------------------------------------------------
 DROP TABLE IF EXISTS reconciled_phenology_weather;
 
 CREATE TABLE reconciled_phenology_weather AS
     SELECT *,
-           CAST(NULL AS VARCHAR(20))  AS event_category,
-           CAST(NULL AS VARCHAR(20))  AS nation,
            CAST(NULL AS VARCHAR(10))  AS lat_band,
            CAST(NULL AS VARCHAR(15))  AS lon_band,
-           CAST(NULL AS SMALLINT)     AS decade
+           CAST(NULL AS SMALLINT)     AS decade,
+           CAST(NULL AS VARCHAR(20))  AS event_category,
+           CAST(NULL AS VARCHAR(30))  AS nation,
+           CAST(NULL AS VARCHAR(50))  AS region
     FROM staging_phenology_weather;
+
+
+-- -----------------------------------------------------------------------------
+-- Derive band strings from centroids
+-- -----------------------------------------------------------------------------
+UPDATE reconciled_phenology_weather
+SET lat_band = CONCAT(FLOOR(band_lat - 0.5)::INT, '-', CEIL(band_lat + 0.5)::INT);
+
+UPDATE reconciled_phenology_weather
+SET lon_band = CONCAT(ROUND(band_lon - 0.5, 0)::INT, ' to ', ROUND(band_lon + 0.5, 0)::INT);
 
 
 -- -----------------------------------------------------------------------------
@@ -65,17 +38,6 @@ CREATE TABLE reconciled_phenology_weather AS
 -- -----------------------------------------------------------------------------
 UPDATE reconciled_phenology_weather
 SET decade = (year / 10) * 10;
-
-
--- -----------------------------------------------------------------------------
--- Derive lat_band and lon_band strings from centroids
--- These become dimension keys in the star schema.
--- -----------------------------------------------------------------------------
-UPDATE reconciled_phenology_weather
-SET lat_band = CONCAT(FLOOR(band_lat - 0.5)::INT, '-', CEIL(band_lat + 0.5)::INT);
-
-UPDATE reconciled_phenology_weather
-SET lon_band = CONCAT(ROUND(band_lon - 0.5, 0)::INT, ' to ', ROUND(band_lon + 0.5, 0)::INT);
 
 
 -- -----------------------------------------------------------------------------
@@ -96,21 +58,15 @@ SET event_category =
             THEN 'Dormancy'
         WHEN event IN ('First cut', 'Last cut')
             THEN 'Management'
+        WHEN event IN ('First recorded')
+            THEN 'Emergence'
         ELSE 'Other'
     END;
 
 
 -- -----------------------------------------------------------------------------
--- Classify nation from band_lat and band_lon
---
--- UK nations overlap in latitude, so both axes are needed:
---   Scotland:         band_lat >= 55
---   Northern Ireland: band_lat BETWEEN 54 AND 55 AND band_lon < -5
---   Wales:            band_lat BETWEEN 51 AND 53 AND band_lon < -3
---   England:          everything else
---
--- These are approximate (band centroids cover 1° cells) but sufficient
--- for OLAP rollup purposes.
+-- Classify nation
+-- UK nations overlap in latitude so longitude is needed to distinguish them.
 -- -----------------------------------------------------------------------------
 UPDATE reconciled_phenology_weather
 SET nation =
@@ -121,6 +77,61 @@ SET nation =
             THEN 'Northern Ireland'
         WHEN band_lat BETWEEN 51 AND 53 AND band_lon < -3
             THEN 'Wales'
+        WHEN band_lon < -10
+            THEN 'Other'
         ELSE 'England'
     END;
 
+
+-- -----------------------------------------------------------------------------
+-- Classify region (ONS regions for England, nations elsewhere)
+-- Each 1°x1° band cell is assigned to its best-fit standard region.
+-- -----------------------------------------------------------------------------
+UPDATE reconciled_phenology_weather
+SET region =
+    CASE
+        -- Scotland regions
+        WHEN band_lat >= 57                                     THEN 'Scottish Highlands'
+        WHEN band_lat BETWEEN 55 AND 57 AND band_lon < -4      THEN 'Scottish West'
+        WHEN band_lat BETWEEN 55 AND 57 AND band_lon >= -4     THEN 'Scottish East'
+
+        -- Northern Ireland
+        WHEN band_lat BETWEEN 54 AND 55 AND band_lon < -5      THEN 'Northern Ireland'
+
+        -- Wales
+        WHEN band_lat BETWEEN 51 AND 53 AND band_lon < -3      THEN 'Wales'
+
+        -- England (ONS regions, approximate by lat/lon band)
+        WHEN band_lat BETWEEN 54 AND 55 AND band_lon > -5 AND band_lon <= -3  THEN 'North West'
+        WHEN band_lat BETWEEN 54 AND 55 AND band_lon > -3                     THEN 'North East'
+        WHEN band_lat BETWEEN 53 AND 54 AND band_lon <= -2                    THEN 'North West'
+        WHEN band_lat BETWEEN 53 AND 54 AND band_lon > -2                     THEN 'Yorkshire and Humber'
+        WHEN band_lat BETWEEN 52 AND 53 AND band_lon <= -2                    THEN 'West Midlands'
+        WHEN band_lat BETWEEN 52 AND 53 AND band_lon > -2                     THEN 'East Midlands'
+        WHEN band_lat BETWEEN 51 AND 52 AND band_lon <= -2                    THEN 'South West'
+        WHEN band_lat BETWEEN 51 AND 52 AND band_lon BETWEEN -2 AND 0         THEN 'South East'
+        WHEN band_lat BETWEEN 51 AND 52 AND band_lon > 0                      THEN 'East of England'
+        WHEN band_lat BETWEEN 50 AND 51                                       THEN 'South West'
+        WHEN band_lat < 50                                                    THEN 'South West'
+        ELSE 'Other'
+    END;
+
+
+-- -----------------------------------------------------------------------------
+-- Sanity checks
+-- -----------------------------------------------------------------------------
+SELECT nation, COUNT(*) AS n
+FROM reconciled_phenology_weather
+GROUP BY nation ORDER BY n DESC;
+
+SELECT region, COUNT(*) AS n
+FROM reconciled_phenology_weather
+GROUP BY region ORDER BY n DESC;
+
+SELECT event_category, COUNT(*) AS n
+FROM reconciled_phenology_weather
+GROUP BY event_category ORDER BY n DESC;
+
+SELECT COUNT(*) AS rows_missing_weather
+FROM reconciled_phenology_weather
+WHERE temp_mean_window IS NULL;

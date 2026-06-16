@@ -1,18 +1,18 @@
 -- =============================================================================
 -- 00_setup.sql
--- Creates the database staging table.
+-- Creates the staging table for the raw CSV import.
 --
 -- Run order:
 --   1. Create the database (run once in terminal):
 --        createdb phenology_dw
 --
---   2. Import the CSV (run once in terminal, from the directory containing the CSV):
---        psql -d phenology_dw -c "\copy staging_phenology_weather
---            FROM 'phenology_weather_unified.csv'
---            WITH (FORMAT csv, HEADER true, NULL '');"
---
---   3. Then run the pipeline in order:
+--   2. Run this file:
 --        psql -d phenology_dw -f 00_setup.sql
+--
+--   3. Import the CSV (from the directory containing the CSV):
+--        psql -d phenology_dw -c "\copy staging_phenology_weather FROM 'phenology_weather_unified.csv' WITH (FORMAT csv, HEADER true, NULL '');"
+--
+--   4. Then run the pipeline in order:
 --        psql -d phenology_dw -f 01_reconciled.sql
 --        psql -d phenology_dw -f 02_schema.sql
 --        psql -d phenology_dw -f 03_load.sql

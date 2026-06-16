@@ -1,6 +1,6 @@
 -- =============================================================================
 -- 03_load.sql
--- Populate dimension tables then fact table from reconciled_phenology_weather.
+-- Populate all dimension tables then the fact table from reconciled layer.
 -- Run after 01_reconciled.sql and 02_schema.sql.
 -- =============================================================================
 
@@ -10,10 +10,10 @@
 -- -----------------------------------------------------------------------------
 INSERT INTO dim_date (full_date, day, month, month_name, season, year, decade)
 SELECT DISTINCT
-    obs_date                                        AS full_date,
+    obs_date,
     day,
     month,
-    TO_CHAR(obs_date, 'Month')                      AS month_name,
+    TO_CHAR(obs_date, 'Month') AS month_name,
     season,
     year,
     decade
@@ -22,41 +22,41 @@ ON CONFLICT (full_date) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
--- dim_lat_band
+-- dim_nation
 -- -----------------------------------------------------------------------------
-INSERT INTO dim_lat_band (lat_band, lat_centroid)
-SELECT DISTINCT
-    lat_band,
-    band_lat    AS lat_centroid
+INSERT INTO dim_nation (nation)
+SELECT DISTINCT nation
 FROM reconciled_phenology_weather
-ON CONFLICT (lat_band) DO NOTHING;
+WHERE nation IS NOT NULL
+ON CONFLICT (nation) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
--- dim_lon_band
+-- dim_region
 -- -----------------------------------------------------------------------------
-INSERT INTO dim_lon_band (lon_band, lon_centroid)
+INSERT INTO dim_region (region, nation_id)
 SELECT DISTINCT
-    lon_band,
-    band_lon    AS lon_centroid
-FROM reconciled_phenology_weather
-ON CONFLICT (lon_band) DO NOTHING;
+    r.region,
+    n.nation_id
+FROM reconciled_phenology_weather r
+JOIN dim_nation n ON n.nation = r.nation
+WHERE r.region IS NOT NULL
+ON CONFLICT (region) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
 -- dim_location
 -- -----------------------------------------------------------------------------
-INSERT INTO dim_location (lat_band_id, lon_band_id, band_lat, band_lon, nation)
+INSERT INTO dim_location (lat_band, lon_band, band_lat, band_lon, region_id)
 SELECT DISTINCT
-    lb.lat_band_id,
-    lo.lon_band_id,
+    r.lat_band,
+    r.lon_band,
     r.band_lat,
     r.band_lon,
-    r.nation
+    rg.region_id
 FROM reconciled_phenology_weather r
-JOIN dim_lat_band lb ON lb.lat_band = r.lat_band
-JOIN dim_lon_band lo ON lo.lon_band = r.lon_band
-ON CONFLICT (lat_band_id, lon_band_id) DO NOTHING;
+JOIN dim_region rg ON rg.region = r.region
+ON CONFLICT (lat_band, lon_band) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
@@ -129,12 +129,23 @@ SELECT
     r.temp_max_year, r.temp_min_year, r.precip_sum_year, r.frost_days_year,
     r.last_frost_doy, r.spring_onset_doy
 FROM reconciled_phenology_weather r
-JOIN dim_date     d  ON d.full_date        = r.obs_date
-JOIN dim_lat_band lb ON lb.lat_band        = r.lat_band
-JOIN dim_lon_band lo ON lo.lon_band        = r.lon_band
-JOIN dim_location l  ON l.lat_band_id      = lb.lat_band_id
-                    AND l.lon_band_id      = lo.lon_band_id
-JOIN dim_species  s  ON s.species          = r.species
-JOIN dim_event    e  ON e.event            = r.event;
+JOIN dim_date     d  ON d.full_date  = r.obs_date
+JOIN dim_location l  ON l.lat_band   = r.lat_band
+                    AND l.lon_band   = r.lon_band
+JOIN dim_species  s  ON s.species    = r.species
+JOIN dim_event    e  ON e.event      = r.event;
 
 
+-- -----------------------------------------------------------------------------
+-- Verify row counts
+-- -----------------------------------------------------------------------------
+SELECT 'dim_date'                     AS tbl, COUNT(*) AS n FROM dim_date
+UNION ALL SELECT 'dim_nation',                 COUNT(*) FROM dim_nation
+UNION ALL SELECT 'dim_region',                 COUNT(*) FROM dim_region
+UNION ALL SELECT 'dim_location',               COUNT(*) FROM dim_location
+UNION ALL SELECT 'dim_species_type',           COUNT(*) FROM dim_species_type
+UNION ALL SELECT 'dim_species',                COUNT(*) FROM dim_species
+UNION ALL SELECT 'dim_event_category',         COUNT(*) FROM dim_event_category
+UNION ALL SELECT 'dim_event',                  COUNT(*) FROM dim_event
+UNION ALL SELECT 'fact_phenology_observation', COUNT(*) FROM fact_phenology_observation
+ORDER BY tbl;
